@@ -1,2 +1,0 @@
-# CalendarGame
-daily puzzle!
