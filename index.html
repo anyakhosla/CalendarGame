@@ -82,6 +82,7 @@ body {
   border-radius: 12px;
   box-shadow: var(--shadow-lg);
   user-select: none;
+  touch-action: none;
 }
 
 .cell {
@@ -149,6 +150,7 @@ body {
   cursor: pointer;
   transition: background 0.12s, transform 0.08s, box-shadow 0.12s;
   box-shadow: 0 1px 4px rgba(0,0,0,0.07);
+  touch-action: manipulation;
 }
 .btn:hover { background: var(--border); box-shadow: 0 2px 8px rgba(0,0,0,0.12); }
 .btn:active { transform: scale(0.96); }
@@ -194,6 +196,7 @@ body {
   padding: 16px 18px;
   max-width: 440px;
   box-shadow: var(--shadow);
+  user-select: none;
 }
 
 .piece-wrap {
@@ -207,6 +210,7 @@ body {
   cursor: grab;
   transition: background 0.12s, transform 0.12s, opacity 0.2s, border-color 0.12s;
   position: relative;
+  touch-action: none;
 }
 .piece-wrap:hover:not(.used) {
   background: var(--bg);
@@ -305,10 +309,22 @@ body {
   white-space: pre;
   overflow-x: auto;
 }
-.stats-grid { display: flex; flex-wrap: wrap; gap: 8px; }
-.stat-box { background: var(--bg); border-radius: 8px; padding: 10px; text-align: center; flex: 1 1 80px; }
+.stats-grid { display: flex; flex-direction: column; gap: 10px; align-items: stretch; }
+.stat-box { background: var(--bg); border-radius: 8px; padding: 10px; text-align: center; }
 .stat-num { font-family: 'Playfair Display', serif; font-size: 26px; font-weight: 700; }
 .stat-lbl { font-size: 9px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.07em; margin-top: 2px; }
+.personality-card { background: var(--bg); border-radius: 10px; padding: 14px 16px; text-align: center; }
+.personality-name { font-family: 'Playfair Display', serif; font-size: 20px; font-weight: 700; }
+.personality-line { font-size: 11px; color: var(--muted); margin-top: 4px; }
+.mini-board { display: grid; grid-template-columns: repeat(7, 14px); gap: 2px; }
+.mini-cell { width: 14px; height: 14px; border-radius: 2px; }
+.flavor-line { font-size: 11px; color: var(--muted); text-align: center; }
+
+/* Mobile */
+@media (max-width: 430px) {
+  :root { --cell: 42px; }
+  .app { padding: 20px 8px 36px; }
+}
 
 /* Progress dots */
 .progress-row {
@@ -371,8 +387,9 @@ body {
 <div class="modal-overlay" id="modal">
   <div class="modal">
     <div class="modal-title" id="modalTitle"></div>
+    <div id="miniBoardWrap" style="display:flex;justify-content:center;margin:4px 0"></div>
     <div class="stats-grid" id="statsGrid"></div>
-    <div class="share-text" id="shareText"></div>
+    <div class="share-text" id="shareText" style="display:none"></div>
     <div style="display:flex;gap:8px;flex-wrap:wrap">
       <button class="btn primary" onclick="copyShare()">Copy to clipboard</button>
       <button class="btn" onclick="closeModal()">Close</button>
@@ -418,12 +435,13 @@ const todayCells = getTodayCells();
 const coverage = new Array(COLS * ROWS).fill(-1);
 
 // ── Stat tracking ─────────────────────────────────────────────
-const stats = { rotations:0, flips:0, resets:0, repositions:0, badDrops:0, startTime: Date.now() };
+const stats = { rotations:0, flips:0, resets:0, repositions:0, badDrops:0, startTime: Date.now(), endTime: null, pieceAttempts: new Array(9).fill(0) };
+let modalData = null; // snapshot stored when win modal opens, used for canvas copy
 
 // ── Piece definitions ─────────────────────────────────────────
 const PIECE_COLORS = ['#7B6FA0','#4a8fa8','#c87941','#6b9e5e','#b85470','#4a6e9e','#9e6b4a','#7a9e4a','#9e4a7a'];
 const PIECE_LIGHT  = ['#c5bfe6','#aad4e4','#f0c898','#b4d4ac','#e4a8bc','#a8bcda','#d4b89c','#c4da94','#d4a4c4'];
-const EMOJI_MAP    = ['🟣','🔵','🟠','🟢','🩷','🔷','🟤','🟡','🟪'];
+const EMOJI_MAP    = ['🔴','🟠','🟡','🟢','🔵','🟣','🟤','⚫','⚪'];
 
 const PIECES_BASE = [
   { name:'Square',  cells:[[0,0],[0,1],[1,0],[1,1]] },
@@ -470,12 +488,10 @@ function liftPiece(pieceId) {
   for (let i=0;i<coverage.length;i++) if (coverage[i]===pieceId) coverage[i]=-1;
   pieces[pieceId].used = false;
 }
-function getAbsCells(anchorIdx, piece) {
-  const aR=Math.floor(anchorIdx/COLS), aC=anchorIdx%COLS;
+function getAbsCells(aR, aC, piece) {
   return getPieceCells(piece).map(([dr,dc])=>(aR+dr)*COLS+(aC+dc));
 }
-function isValid(anchorIdx, piece) {
-  const aR=Math.floor(anchorIdx/COLS), aC=anchorIdx%COLS;
+function isValid(aR, aC, piece) {
   for (const [dr,dc] of getPieceCells(piece)) {
     const r=aR+dr, c=aC+dc;
     if (r<0||r>=ROWS||c<0||c>=COLS) return false;
@@ -496,6 +512,8 @@ let dragGhost = null;          // ghost el
 let dragOffsetR = 0;           // which cell of the piece the user grabbed
 let dragOffsetC = 0;
 let currentHoverIdx = null;
+let pendingBoardDrag = null;   // { startX, startY, idx } — waiting for threshold
+let pendingTrayDrag  = null;   // { startX, startY, pieceId, wrap } — waiting for threshold
 
 // Piece dimensions for centering ghost
 function getPieceDims(piece) {
@@ -545,25 +563,85 @@ function removeGhost() {
   if (dragGhost) { dragGhost.remove(); dragGhost = null; }
 }
 
+// ── Drag thresholds (board + tray) ────────────────────────────
+const DRAG_THRESHOLD = 5;
+
+function onBoardPendingMove(e) {
+  if (!pendingBoardDrag) return;
+  if (e.cancelable) e.preventDefault();
+  const dx = e.clientX - pendingBoardDrag.startX;
+  const dy = e.clientY - pendingBoardDrag.startY;
+  if (Math.hypot(dx, dy) > DRAG_THRESHOLD) {
+    const idx = pendingBoardDrag.idx;
+    cleanupBoardPending();
+    startBoardDrag(e, idx);
+  }
+}
+function onBoardPendingUp() {
+  if (!pendingBoardDrag) { cleanupBoardPending(); return; }
+  const { idx } = pendingBoardDrag;
+  cleanupBoardPending();
+  const pieceId = coverage[idx];
+  if (pieceId !== -1) {
+    liftPiece(pieceId);
+    stats.repositions++;
+    renderBoard(); renderTray(); updateBtns();
+    setStatus(`${pieces[pieceId].name} returned to tray.`);
+  }
+}
+function cleanupBoardPending() {
+  pendingBoardDrag = null;
+  document.removeEventListener('pointermove', onBoardPendingMove);
+  document.removeEventListener('pointerup', onBoardPendingUp);
+}
+
+function onTrayPendingMove(e) {
+  if (!pendingTrayDrag) return;
+  if (e.cancelable) e.preventDefault();
+  const dx = e.clientX - pendingTrayDrag.startX;
+  const dy = e.clientY - pendingTrayDrag.startY;
+  if (Math.hypot(dx, dy) > DRAG_THRESHOLD) {
+    const { pieceId, wrap } = pendingTrayDrag;
+    cleanupTrayPending();
+    startTrayDrag(e, pieceId, wrap);
+  }
+}
+function onTrayPendingUp() { cleanupTrayPending(); }
+function cleanupTrayPending() {
+  pendingTrayDrag = null;
+  document.removeEventListener('pointermove', onTrayPendingMove);
+  document.removeEventListener('pointerup', onTrayPendingUp);
+}
+
 // ── Anchor calculation ────────────────────────────────────────
-// When dropping, find anchor so the piece's top-left cell lands at hovered cell
-function getAnchorForDrop(hoverIdx) {
-  // Just use hoverIdx as the anchor (top-left of bounding box)
-  return hoverIdx;
+// Compute (row, col) anchor adjusted so the piece's visual center aligns with
+// the hovered cell, matching the ghost which is horizontally centered and 30px
+// above the cursor.
+function getAnchorRC(hoverIdx) {
+  const hR = Math.floor(hoverIdx / COLS);
+  const hC = hoverIdx % COLS;
+  if (!dragPiece) return [hR, hC];
+  const GSIZ = 26, GAP = 3;
+  const { cols } = getPieceDims(dragPiece);
+  const totalW = cols * (GSIZ + GAP) - GAP;
+  const dC = Math.round((totalW / 2) / (GSIZ + GAP));
+  const dR = Math.round(30 / (GSIZ + GAP));
+  return [hR - dR, hC - dC];
 }
 
 // ── Drag from tray ────────────────────────────────────────────
-function startTrayDrag(e, pieceId) {
-  e.preventDefault();
+function startTrayDrag(e, pieceId, wrapEl) {
+  cleanupBoardPending();
+  cleanupTrayPending();
   isDragging = true;
   dragPiece = pieces[pieceId];
-  selectedPiece = dragPiece;  // keep R/F target in sync  dragFromBoard = false;
+  selectedPiece = dragPiece;
   dragGhost = createGhost(dragPiece);
   moveGhost(e);
-  const wrap = e.currentTarget;
-  wrap.classList.add('dragging');
-  document.addEventListener('mousemove', onDragMove);
-  document.addEventListener('mouseup', onDragEnd);
+  const wrap = wrapEl ?? e.currentTarget;
+  if (wrap) wrap.classList.add('dragging');
+  document.addEventListener('pointermove', onDragMove);
+  document.addEventListener('pointerup', onDragEnd);
   setHint(`Dragging ${dragPiece.name} — drop on board · R rotate · F flip`);
 }
 
@@ -583,43 +661,49 @@ function startBoardDrag(e, idx) {
   renderBoard();
   renderTray();
   updateBtns();
-  document.addEventListener('mousemove', onDragMove);
-  document.addEventListener('mouseup', onDragEnd);
+  document.addEventListener('pointermove', onDragMove);
+  document.addEventListener('pointerup', onDragEnd);
   setHint(`Moving ${dragPiece.name} — R to rotate, F to flip`);
 }
 
+// Math-based hover — works over void cells and adapts to responsive --cell size
+function cellIdxFromPoint(clientX, clientY) {
+  const board = document.getElementById('board');
+  const rect = board.getBoundingClientRect();
+  const GAP = 3;
+  const CELL = (rect.width - GAP * 8) / 7; // derived from actual board width
+  const col = Math.floor((clientX - rect.left - GAP) / (CELL + GAP));
+  const row = Math.floor((clientY - rect.top  - GAP) / (CELL + GAP));
+  if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return null;
+  return row * COLS + col;
+}
+
 function onDragMove(e) {
+  if (e.cancelable) e.preventDefault(); // prevent page scroll on touch
   moveGhost(e);
-  // Find which cell we're over
-  const el = document.elementFromPoint(e.clientX, e.clientY);
-  const cell = el?.closest?.('.cell');
-  const idx = cell ? parseInt(cell.dataset.idx) : null;
+  const idx = cellIdxFromPoint(e.clientX, e.clientY);
   if (idx !== currentHoverIdx) {
     clearPreview();
-    currentHoverIdx = (idx !== null && !isNaN(idx)) ? idx : null;
+    currentHoverIdx = idx;
     if (currentHoverIdx !== null) showPreview(currentHoverIdx);
   }
 }
 
 function onDragEnd(e) {
-  document.removeEventListener('mousemove', onDragMove);
-  document.removeEventListener('mouseup', onDragEnd);
+  document.removeEventListener('pointermove', onDragMove);
+  document.removeEventListener('pointerup', onDragEnd);
   clearPreview();
   removeGhost();
   isDragging = false;
 
-  // Remove dragging class from all tray pieces
   document.querySelectorAll('.piece-wrap.dragging').forEach(el=>el.classList.remove('dragging'));
 
   if (!dragPiece) return;
-  const el = document.elementFromPoint(e.clientX, e.clientY);
-  const cell = el?.closest?.('.cell');
-  const idx = cell ? parseInt(cell.dataset.idx) : null;
+  const idx = cellIdxFromPoint(e.clientX, e.clientY);
 
-  if (idx !== null && !isNaN(idx)) {
+  if (idx !== null) {
     placePiece(idx);
   } else {
-    // Dropped off board — put back as unused
     dragPiece.used = false;
     setStatus('Piece returned to tray.');
   }
@@ -628,23 +712,17 @@ function onDragEnd(e) {
   renderBoard(); renderTray(); updateBtns();
 }
 
-function placePiece(anchorIdx) {
-  const def = cellDefs[anchorIdx];
-  if (!def || def.type==='void' || todayCells.includes(anchorIdx)) {
-    flashInvalid(anchorIdx);
-    dragPiece.used = false;
-    stats.badDrops++;
-    setStatus('Cannot place there.');
-    return;
-  }
-  if (!isValid(anchorIdx, dragPiece)) {
-    flashInvalid(anchorIdx);
+function placePiece(hoverIdx) {
+  const [aR, aC] = getAnchorRC(hoverIdx);
+  stats.pieceAttempts[dragPiece.id]++;
+  if (!isValid(aR, aC, dragPiece)) {
+    flashInvalid(aR, aC);
     dragPiece.used = false;
     stats.badDrops++;
     setStatus('That spot is blocked — try rotating or a different position.');
     return;
   }
-  getAbsCells(anchorIdx, dragPiece).forEach(i=>{ coverage[i]=dragPiece.id; });
+  getAbsCells(aR, aC, dragPiece).forEach(i=>{ coverage[i]=dragPiece.id; });
   dragPiece.used = true;
   const placed = dragPiece;
   selectedPiece = null;
@@ -652,7 +730,7 @@ function placePiece(anchorIdx) {
   // plop animation
   requestAnimationFrame(()=>{
     const board = document.getElementById('board');
-    getAbsCells(anchorIdx, placed).forEach(i=>{
+    getAbsCells(aR, aC, placed).forEach(i=>{
       if (board.children[i]) {
         board.children[i].classList.add('just-placed');
         setTimeout(()=>board.children[i]?.classList.remove('just-placed'), 300);
@@ -664,9 +742,8 @@ function placePiece(anchorIdx) {
   updateProgress();
 }
 
-function flashInvalid(anchorIdx) {
+function flashInvalid(aR, aC) {
   const board = document.getElementById('board');
-  const aR=Math.floor(anchorIdx/COLS), aC=anchorIdx%COLS;
   if (dragPiece) {
     for (const [dr,dc] of getPieceCells(dragPiece)) {
       const r=aR+dr, c=aC+dc;
@@ -681,10 +758,10 @@ function flashInvalid(anchorIdx) {
 }
 
 // ── Preview ───────────────────────────────────────────────────
-function showPreview(anchorIdx) {
+function showPreview(hoverIdx) {
   if (!dragPiece) return;
-  const valid = isValid(anchorIdx, dragPiece);
-  const aR=Math.floor(anchorIdx/COLS), aC=anchorIdx%COLS;
+  const [aR, aC] = getAnchorRC(hoverIdx);
+  const valid = isValid(aR, aC, dragPiece);
   const board=document.getElementById('board');
   for (const [dr,dc] of getPieceCells(dragPiece)) {
     const r=aR+dr, c=aC+dc;
@@ -735,9 +812,13 @@ function renderBoard() {
       const p=pieces[coverage[i]];
       div.style.background=p.color;
       div.style.color=p.colorLight;
-      // Allow drag-to-lift from board
-      div.addEventListener('mousedown', (e)=>{
-        if (e.button===0) startBoardDrag(e, i);
+      // Allow drag-to-lift from board (threshold prevents accidental drags on click)
+      div.addEventListener('pointerdown', (e)=>{
+        if (e.button !== 0) return;
+        e.preventDefault();
+        pendingBoardDrag = { startX: e.clientX, startY: e.clientY, idx: i };
+        document.addEventListener('pointermove', onBoardPendingMove);
+        document.addEventListener('pointerup', onBoardPendingUp);
       });
       div.addEventListener('contextmenu', (e)=>{
         e.preventDefault();
@@ -790,7 +871,12 @@ function renderTray() {
             : 'Drag pieces from the tray onto the board · Right-click to rotate/flip');
         }
       });
-      wrap.addEventListener('mousedown', (e)=>{ if(e.button===0) startTrayDrag(e, piece.id); });
+      wrap.addEventListener('pointerdown', (e)=>{
+        if (e.button !== 0) return;
+        pendingTrayDrag = { startX: e.clientX, startY: e.clientY, pieceId: piece.id, wrap };
+        document.addEventListener('pointermove', onTrayPendingMove);
+        document.addEventListener('pointerup', onTrayPendingUp);
+      });
       wrap.addEventListener('contextmenu', (e)=>{ e.preventDefault(); openCtxTray(e, piece.id); });
     }
     tray.appendChild(wrap);
@@ -891,7 +977,7 @@ function clearBoard() {
   coverage.fill(-1);
   pieces.forEach(p=>{ p.used=false; p.rotation=0; p.flipped=false; });
   dragPiece=null; selectedPiece=null; removeGhost();
-  stats.resets++; stats.rotations=0; stats.flips=0; stats.repositions=0; stats.badDrops=0; stats.startTime=Date.now();
+  stats.resets++; stats.rotations=0; stats.flips=0; stats.repositions=0; stats.badDrops=0; stats.startTime=Date.now(); stats.endTime=null; stats.pieceAttempts.fill(0);
   renderBoard(); renderTray(); updateBtns(); updateProgress();
   setStatus('Board cleared — good luck!');
   setHint('Drag pieces from the tray onto the board · Right-click to rotate/flip');
@@ -899,57 +985,111 @@ function clearBoard() {
 function setStatus(msg) { document.getElementById('status').textContent=msg; }
 function setHint(msg) { document.getElementById('hintBar').textContent=msg; }
 
+// ── Win/Share helpers ─────────────────────────────────────────
+function getPersonality(elapsed) {
+  const tweaks = stats.rotations + stats.flips;
+  const totalInteractions = tweaks + stats.repositions + stats.badDrops + 9;
+  const timePerAction = elapsed / totalInteractions;
+  if (elapsed < 120 && stats.resets === 0)                                       return { name:'The Speedrunner',    line:'finished before others even started' };
+  if (stats.repositions <= 3 && stats.resets === 0)                             return { name:'The Mastermind',     line:'saw the whole solution from the start' };
+  if (stats.repositions > 20 || (stats.resets >= 1 && stats.repositions > 12))   return { name:'The Chaotic Genius', line:'brilliant chaos, and it worked' };
+  if (tweaks > 20)                                                                return { name:'The Spinner',        line:'spun every piece into place' };
+  if (timePerAction > 20)                                                          return { name:'The Thinker',        line:'thought it through, move by move' };
+  return                                                                                 { name:'The Champion',       line:'got it done' };
+}
+
+function buildMiniBoard() {
+  const grid = document.createElement('div');
+  grid.className = 'mini-board';
+  for (let i = 0; i < ROWS * COLS; i++) {
+    const def = cellDefs[i];
+    const mc = document.createElement('div');
+    mc.className = 'mini-cell';
+    if (def.type === 'void')          mc.style.background = 'transparent';
+    else if (todayCells.includes(i))  mc.style.background = 'var(--today-bg)';
+    else if (coverage[i] !== -1)      mc.style.background = pieces[coverage[i]].color;
+    else                              mc.style.background = 'var(--cell-bg)';
+    grid.appendChild(mc);
+  }
+  return grid;
+}
+
+function getRecipeLine() {
+  const parts = [];
+  if (stats.resets > 0)       parts.push(`${stats.resets} reset${stats.resets !== 1 ? 's' : ''}`);
+  const tweaks = stats.rotations + stats.flips;
+  if (tweaks > 0)             parts.push(`${tweaks} rotation${tweaks !== 1 ? 's' : ''}`);
+  if (stats.repositions > 0)  parts.push(`${stats.repositions} reposition${stats.repositions !== 1 ? 's' : ''}`);
+  return parts.length > 0 ? parts.join(' · ') : null;
+}
+
+function getNemesisPiece() {
+  const max = Math.max(...stats.pieceAttempts);
+  if (max < 7) return null;
+  return pieces[stats.pieceAttempts.indexOf(max)].name;
+}
+
 // ── Win/Share ─────────────────────────────────────────────────
 function checkWin() {
-  const coverable=cellDefs.filter((d,i)=>d.type!=='void'&&!todayCells.includes(i)).length;
-  const covered=coverage.filter((v,i)=>v!==-1&&cellDefs[i].type!=='void').length;
-  const piecesUsed=pieces.filter(p=>p.used).length;
-  const solved=covered===coverable&&piecesUsed===pieces.length;
+  const coverable = cellDefs.filter((d,i) => d.type !== 'void' && !todayCells.includes(i)).length;
+  const covered   = coverage.filter((v,i) => v !== -1 && cellDefs[i].type !== 'void').length;
+  const piecesUsed = pieces.filter(p => p.used).length;
+  const solved = covered === coverable && piecesUsed === pieces.length;
 
-  const elapsed = Math.floor((Date.now()-stats.startTime)/1000);
-  const mins = Math.floor(elapsed/60), secs = elapsed%60;
-  const timeStr = mins>0 ? `${mins}m ${secs}s` : `${secs}s`;
+  if (solved && !stats.endTime) stats.endTime = Date.now();
+  const elapsed = Math.floor(((stats.endTime || Date.now()) - stats.startTime) / 1000);
+  const mins = Math.floor(elapsed / 60), secs = elapsed % 60;
+  const timeStr = mins > 0 ? `${mins}:${secs < 10 ? '0' : ''}${secs}` : `${secs}s`;
+  const dateStr = `${monthsFull[todayMonth]} ${todayDate}, ${today.getFullYear()}`;
 
-  let grid='';
-  for (let r=0;r<ROWS;r++) {
-    let line='';
-    for (let c=0;c<COLS;c++) {
-      const idx=r*COLS+c;
-      const def=cellDefs[idx];
-      if (def.type==='void'){line+='⬛';continue;}
-      if (todayCells.includes(idx)){line+='🔴';continue;}
-      line+=coverage[idx]!==-1?EMOJI_MAP[coverage[idx]]:'⬜';
-    }
-    grid+=line.replace(/⬛+$/,'')+'\n';
+  document.getElementById('miniBoardWrap').innerHTML = '';
+  document.getElementById('miniBoardWrap').appendChild(buildMiniBoard());
+
+  if (solved) {
+    const p = getPersonality(elapsed);
+    const recipe = getRecipeLine();
+    const nemesis = getNemesisPiece();
+    modalData = { elapsed, personality: p, timeStr, dateStr };
+    document.getElementById('modalTitle').textContent = 'Puzzle solved!';
+    document.getElementById('statsGrid').innerHTML = `
+      <div class="personality-card">
+        <div class="personality-name">${p.name}</div>
+        <div class="personality-line">${p.line}</div>
+      </div>
+      <div class="stat-box"><div class="stat-num">${timeStr}</div><div class="stat-lbl">Time</div></div>
+      ${recipe ? `<div class="flavor-line">${recipe}</div>` : ''}
+      ${nemesis ? `<div class="flavor-line" style="font-style:italic">nemesis: ${nemesis}</div>` : ''}`;
+    const shareLines = [`Cal·Puzzle · ${dateStr}`, `${p.name} · ${timeStr}`];
+    if (recipe) shareLines.push(recipe);
+    if (nemesis) shareLines.push(`nemesis: ${nemesis}`);
+    shareLines.push('https://anyakhosla.github.io/CalendarGame/');
+    document.getElementById('shareText').textContent = shareLines.join('\n');
+  } else {
+    document.getElementById('modalTitle').textContent = `In progress — ${covered}/${coverable}`;
+    document.getElementById('statsGrid').innerHTML = `
+      <div class="stat-box"><div class="stat-num">${covered}/${coverable}</div><div class="stat-lbl">Cells covered</div></div>
+      <div class="stat-box"><div class="stat-num">${timeStr}</div><div class="stat-lbl">Time</div></div>`;
+    document.getElementById('shareText').textContent = `Cal·Puzzle · ${dateStr}\n${covered}/${coverable} cells · ${timeStr}\nhttps://anyakhosla.github.io/CalendarGame/`;
   }
 
-  // Fun stat lines for share text
-  const funLines = [];
-  if (stats.resets > 0) funLines.push(`🔄 Reset ${stats.resets}x`);
-  if (stats.rotations > 0) funLines.push(`↻ Rotated ${stats.rotations}x`);
-  if (stats.flips > 0) funLines.push(`⇄ Flipped ${stats.flips}x`);
-  if (stats.repositions > 0) funLines.push(`✋ Moved pieces ${stats.repositions}x`);
-  if (stats.badDrops > 0) funLines.push(`💥 Missed ${stats.badDrops}x`);
-  if (solved) funLines.push(`⏱ Solved in ${timeStr}`);
-
-  const dateStr=`${monthsFull[todayMonth]} ${todayDate}`;
-  const statusLine = solved ? '✅' : `🔄 (${covered}/${coverable} cells)`;
-  const msg=`Cal·Puzzle ${dateStr} ${statusLine}\n${grid}${funLines.length?funLines.join(' · ')+'\n':''}\ncalpuzzle.app`;
-
-  document.getElementById('modalTitle').textContent=solved?'🎉 Puzzle solved!':`📋 Progress — ${covered}/${coverable}`;
-  document.getElementById('statsGrid').innerHTML=`
-    <div class="stat-box"><div class="stat-num">${piecesUsed}</div><div class="stat-lbl">Placed</div></div>
-    <div class="stat-box"><div class="stat-num">${covered}</div><div class="stat-lbl">Covered</div></div>
-    <div class="stat-box"><div class="stat-num">${coverable-covered}</div><div class="stat-lbl">Remaining</div></div>
-    <div class="stat-box"><div class="stat-num">${timeStr}</div><div class="stat-lbl">Time</div></div>
-    <div class="stat-box"><div class="stat-num">${stats.rotations+stats.flips}</div><div class="stat-lbl">Tweaks</div></div>
-    <div class="stat-box"><div class="stat-num">${stats.repositions}</div><div class="stat-lbl">Repositions</div></div>
-    ${stats.resets>0?`<div class="stat-box" style="grid-column:1/-1"><div class="stat-num">${stats.resets}</div><div class="stat-lbl">Resets 😅</div></div>`:''}`;
-  document.getElementById('shareText').textContent=msg;
   document.getElementById('modal').classList.add('show');
 }
 function copyShare() {
-  navigator.clipboard.writeText(document.getElementById('shareText').textContent).then(()=>{
+  const d = modalData || { personality: { name: '' }, timeStr: '—', dateStr: '' };
+  const recipe = getRecipeLine();
+  let grid = '';
+  for (let r = 0; r < ROWS; r++) {
+    let line = '';
+    for (let c = 0; c < COLS; c++) {
+      const idx = r * COLS + c;
+      if (cellDefs[idx].type === 'void')  { line += '⬛'; continue; }
+      if (todayCells.includes(idx))       { line += '🟥'; continue; }
+      line += coverage[idx] !== -1 ? EMOJI_MAP[coverage[idx]] : '⬜';
+    }
+    grid += line.replace(/⬛+$/, '') + '\n';
+  }
+  const lines = [`Cal·Puzzle · ${d.dateStr}`, `${d.personality.name} · ${d.timeStr}`, '', grid.trimEnd(), '', 'https://anyakhosla.github.io/CalendarGame/'];
+  navigator.clipboard.writeText(lines.join('\n')).then(() => {
     setStatus('Copied! Share it 🎉'); closeModal();
   });
 }
